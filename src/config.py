@@ -23,7 +23,8 @@ N_SPLITS = 5
 
 
 # Model tuning
-N_ITER_RANDOM_SEARCH = 20
+# Keep this value aligned with the training script.
+N_ITER_RANDOM_SEARCH = 30
 
 
 # Output directories
