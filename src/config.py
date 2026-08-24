@@ -23,13 +23,14 @@ N_SPLITS = 5
 
 
 # Model tuning
-# Keep this value aligned with the training script.
 N_ITER_RANDOM_SEARCH = 30
 
 
 # Output directories
 MODELS_DIR = PROJECT_ROOT / "models"
-FIGURES_DIR = PROJECT_ROOT / "reports" / "figures"
+REPORTS_DIR = PROJECT_ROOT / "reports"
+FIGURES_DIR = REPORTS_DIR / "figures"
+
 
 XGB_PARAM_GRID = {
     "model__n_estimators": [100, 200, 300, 500, 800],
