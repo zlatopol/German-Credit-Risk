@@ -9,7 +9,6 @@ from sklearn.preprocessing import (
 
 
 def build_preprocessor() -> ColumnTransformer:
-
     numeric_features = [
         "Age",
         "Duration",
@@ -38,15 +37,11 @@ def build_preprocessor() -> ColumnTransformer:
     categorical_pipeline = Pipeline([
         (
             "imputer",
-            SimpleImputer(
-                strategy="most_frequent"
-            ),
+            SimpleImputer(strategy="most_frequent"),
         ),
         (
             "ohe",
-            OneHotEncoder(
-                handle_unknown="ignore"
-            ),
+            OneHotEncoder(handle_unknown="ignore"),
         ),
     ])
 
@@ -61,6 +56,24 @@ def build_preprocessor() -> ColumnTransformer:
         (
             "ordinal",
             OrdinalEncoder(
+                categories=[
+                    # Lower values represent less favorable
+                    # account status; higher values represent
+                    # more favorable account status.
+                    [
+                        "<0 DM",
+                        "0<=X<200 DM",
+                        ">=200 DM",
+                        "No account",
+                    ],
+                    [
+                        "little",
+                        "moderate",
+                        "quite rich",
+                        "rich",
+                        "No account",
+                    ],
+                ],
                 handle_unknown="use_encoded_value",
                 unknown_value=-1,
             ),
@@ -74,7 +87,7 @@ def build_preprocessor() -> ColumnTransformer:
         ),
     ])
 
-    preprocessor = ColumnTransformer(
+    return ColumnTransformer(
         transformers=[
             (
                 "categorical",
@@ -98,5 +111,3 @@ def build_preprocessor() -> ColumnTransformer:
             ),
         ]
     )
-
-    return preprocessor
