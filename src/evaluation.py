@@ -21,9 +21,9 @@ def get_predictions(model, X):
 def calculate_metrics(y_true, y_pred, y_proba):
     return {
         "Accuracy": accuracy_score(y_true, y_pred),
-        "Precision": precision_score(y_true, y_pred),
-        "Recall": recall_score(y_true, y_pred),
-        "F1": f1_score(y_true, y_pred),
+        "Precision": precision_score(y_true, y_pred, zero_division=0),
+        "Recall": recall_score(y_true, y_pred, zero_division=0),
+        "F1": f1_score(y_true, y_pred, zero_division=0),
         "ROC-AUC": roc_auc_score(y_true, y_proba),
     }
 
@@ -34,14 +34,22 @@ def evaluate_model(model, X, y):
     return calculate_metrics(
         y,
         y_pred,
-        y_proba
+        y_proba,
     )
 
 
 def find_best_threshold(y_true, y_proba):
+    """
+    Find the decision threshold that maximizes F1.
+
+    precision_recall_curve returns one more precision/recall value
+    than thresholds, so the last F1 value has no corresponding
+    threshold and must not be used for threshold selection.
+    """
+
     precisions, recalls, thresholds = precision_recall_curve(
         y_true,
-        y_proba
+        y_proba,
     )
 
     f1_scores = (
@@ -49,11 +57,14 @@ def find_best_threshold(y_true, y_proba):
         / (precisions + recalls + 1e-10)
     )
 
-    best_idx = np.argmax(f1_scores)
+    # The final precision/recall pair has no matching threshold.
+    f1_for_thresholds = f1_scores[:-1]
 
+    best_idx = np.argmax(f1_for_thresholds)
     best_threshold = thresholds[best_idx]
 
-    return best_threshold, f1_scores[best_idx]
+    return best_threshold, f1_for_thresholds[best_idx]
+
 
 def get_feature_importance(pipeline):
     """
@@ -69,12 +80,12 @@ def get_feature_importance(pipeline):
 
     importance_df = pd.DataFrame({
         "Feature": feature_names,
-        "Importance": importance
+        "Importance": importance,
     })
 
     importance_df = importance_df.sort_values(
         "Importance",
-        ascending=False
+        ascending=False,
     )
 
     return importance_df
