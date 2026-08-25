@@ -1,45 +1,47 @@
-import os
+"""SHAP analysis for the final XGBoost credit-risk model.
+
+This module can be run independently with::
+
+    python -m src.shap_analysis
+
+It also exposes reusable helpers for ``shap_report.py`` and other modules.
+"""
+
+from pathlib import Path
 
 import joblib
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import shap
-import matplotlib.pyplot as plt
 
 from sklearn.metrics import confusion_matrix
 
-from .config import RANDOM_STATE
+from .config import DECISION_THRESHOLD, MODELS_DIR, REPORTS_DIR
 
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
-
-MODEL_PATH = "models/xgboost_final.joblib"
-TEST_DATA_PATH = "reports/test_data.csv"
-OUTPUT_DIR = "reports/shap_errors"
-
-THRESHOLD = 0.236
 MAX_DISPLAY = 15
+MODEL_PATH = MODELS_DIR / "xgboost_final.joblib"
+TEST_DATA_PATH = REPORTS_DIR / "test_data.csv"
+OUTPUT_DIR = REPORTS_DIR / "shap_errors"
 
 
 # ============================================================
 # LOAD DATA
 # ============================================================
 
-def load_model_and_test_data():
-    """
-    Load the final XGBoost pipeline and test dataset.
-    """
 
-    model_pipeline = joblib.load(MODEL_PATH)
+def load_model_and_test_data(
+    model_path: Path = MODEL_PATH,
+    test_data_path: Path = TEST_DATA_PATH,
+):
+    """Load the final XGBoost pipeline and saved test dataset."""
 
-    test_df = pd.read_csv(TEST_DATA_PATH)
+    model_pipeline = joblib.load(model_path)
+    test_df = pd.read_csv(test_data_path)
 
     if "Risk" not in test_df.columns:
-        raise ValueError(
-            "Column 'Risk' was not found in test_data.csv"
-        )
+        raise ValueError("Column 'Risk' was not found in test_data.csv")
 
     X_test = test_df.drop(columns="Risk")
     y_test = test_df["Risk"]
@@ -48,136 +50,128 @@ def load_model_and_test_data():
 
 
 # ============================================================
-# PREDICTIONS
+# PREDICTIONS / ERROR GROUPS
 # ============================================================
+
 
 def get_predictions(
     model_pipeline,
     X_test,
-    threshold=THRESHOLD,
+    threshold: float = DECISION_THRESHOLD,
 ):
-    """
-    Generate probabilities and predictions.
-    """
+    """Generate probabilities and predictions using ``threshold``."""
 
-    y_proba = model_pipeline.predict_proba(
-        X_test
-    )[:, 1]
-
-    y_pred = (
-        y_proba >= threshold
-    ).astype(int)
-
+    y_proba = model_pipeline.predict_proba(X_test)[:, 1]
+    y_pred = (y_proba >= threshold).astype(int)
     return y_proba, y_pred
 
 
-# ============================================================
-# ERROR GROUPS
-# ============================================================
+def create_error_groups(y_test, y_pred):
+    """Return boolean masks for TP, TN, FP and FN observations."""
 
-def create_error_groups(
-    y_test,
-    y_pred,
-):
-    """
-    Create boolean masks for TP, TN, FP and FN.
-    """
-
-    y_true = y_test.to_numpy()
-
-    tp_mask = (
-        (y_true == 1)
-        & (y_pred == 1)
-    )
-
-    tn_mask = (
-        (y_true == 0)
-        & (y_pred == 0)
-    )
-
-    fp_mask = (
-        (y_true == 0)
-        & (y_pred == 1)
-    )
-
-    fn_mask = (
-        (y_true == 1)
-        & (y_pred == 0)
-    )
+    y_true = np.asarray(y_test)
+    y_pred = np.asarray(y_pred)
 
     return {
-        "TP": tp_mask,
-        "TN": tn_mask,
-        "FP": fp_mask,
-        "FN": fn_mask,
+        "TP": (y_true == 1) & (y_pred == 1),
+        "TN": (y_true == 0) & (y_pred == 0),
+        "FP": (y_true == 0) & (y_pred == 1),
+        "FN": (y_true == 1) & (y_pred == 0),
     }
+
+
+# ============================================================
+# MODEL / PREPROCESSING
+# ============================================================
+
+
+def get_model_parts(model_pipeline):
+    """Extract the fitted preprocessor and estimator from a pipeline."""
+
+    if not hasattr(model_pipeline, "named_steps"):
+        return None, model_pipeline
+
+    steps = model_pipeline.named_steps
+
+    estimator = steps.get("model") or steps.get("classifier")
+    if estimator is None:
+        estimator = list(steps.values())[-1]
+
+    preprocessor = next(
+        (
+            steps[name]
+            for name in ("preprocessor", "preprocess", "transformer")
+            if name in steps
+        ),
+        None,
+    )
+
+    return preprocessor, estimator
+
+
+def transform_test_data(model_pipeline, X_test):
+    """Apply the fitted preprocessing and return transformed data + names."""
+
+    preprocessor, _ = get_model_parts(model_pipeline)
+
+    if preprocessor is None:
+        return X_test.to_numpy(), np.asarray(X_test.columns, dtype=object)
+
+    X_transformed = preprocessor.transform(X_test)
+
+    if hasattr(X_transformed, "toarray"):
+        X_transformed = X_transformed.toarray()
+
+    X_transformed = np.asarray(X_transformed)
+
+    try:
+        feature_names = np.asarray(
+            preprocessor.get_feature_names_out(),
+            dtype=object,
+        )
+    except Exception:
+        feature_names = np.asarray(
+            [f"feature_{i}" for i in range(X_transformed.shape[1])],
+            dtype=object,
+        )
+
+    if len(feature_names) != X_transformed.shape[1]:
+        feature_names = np.asarray(
+            [f"feature_{i}" for i in range(X_transformed.shape[1])],
+            dtype=object,
+        )
+
+    return X_transformed, feature_names
 
 
 # ============================================================
 # SHAP VALUES
 # ============================================================
 
-def calculate_shap_values(
-    model_pipeline,
-    X_test,
-):
-    """
-    Calculate SHAP values for the XGBoost model.
 
-    Preprocessing is taken directly from the trained pipeline.
-    """
+def calculate_shap_values(model_pipeline, X_test):
+    """Calculate SHAP values for the fitted XGBoost estimator."""
 
-    preprocessor = (
-        model_pipeline
-        .named_steps["preprocessor"]
+    _, estimator = get_model_parts(model_pipeline)
+    X_test_transformed, feature_names = transform_test_data(
+        model_pipeline,
+        X_test,
     )
 
-    model = (
-        model_pipeline
-        .named_steps["model"]
-    )
+    explainer = shap.TreeExplainer(estimator)
+    shap_values = explainer.shap_values(X_test_transformed)
 
-    X_test_transformed = (
-        preprocessor.transform(X_test)
-    )
+    if isinstance(shap_values, list):
+        shap_values = shap_values[1] if len(shap_values) == 2 else shap_values[0]
 
-    # Convert sparse matrix to dense.
-    if hasattr(
-        X_test_transformed,
-        "toarray",
-    ):
-        X_test_transformed = (
-            X_test_transformed.toarray()
-        )
+    shap_values = np.asarray(shap_values)
 
-    feature_names = (
-        preprocessor
-        .get_feature_names_out()
-    )
-
-    explainer = shap.TreeExplainer(
-        model
-    )
-
-    shap_values = explainer.shap_values(
-        X_test_transformed
-    )
-
-    # XGBoost / SHAP versions can return
-    # different formats.
-    if isinstance(
-        shap_values,
-        list,
-    ):
-        shap_values = shap_values[0]
+    if shap_values.ndim == 3:
+        shap_values = shap_values[:, :, 1]
 
     base_value = explainer.expected_value
-
-    if isinstance(
-        base_value,
-        np.ndarray,
-    ):
-        base_value = base_value[0]
+    if isinstance(base_value, np.ndarray):
+        base_value = base_value[1] if base_value.size == 2 else base_value[0]
 
     return (
         explainer,
@@ -189,113 +183,79 @@ def calculate_shap_values(
 
 
 # ============================================================
-# SHAP IMPORTANCE
+# IMPORTANCE
 # ============================================================
 
-def calculate_group_importance(
-    shap_values,
-    feature_names,
-    mask,
-):
-    """
-    Calculate mean absolute SHAP importance
-    for one error group.
-    """
+
+def calculate_group_importance(shap_values, feature_names, mask):
+    """Calculate mean absolute SHAP importance for one group."""
 
     if mask.sum() == 0:
-        return pd.DataFrame(
-            columns=[
-                "Feature",
-                "Importance",
-            ]
-        )
+        return pd.DataFrame(columns=["Feature", "Importance"])
 
-    group_shap = shap_values[mask]
+    importance = np.abs(shap_values[mask]).mean(axis=0)
 
-    importance = (
-        np.abs(group_shap)
-        .mean(axis=0)
-    )
-
-    importance_df = pd.DataFrame({
-        "Feature": feature_names,
-        "Importance": importance,
-    })
-
-    importance_df = (
-        importance_df
-        .sort_values(
-            "Importance",
-            ascending=False,
-        )
+    return (
+        pd.DataFrame({"Feature": feature_names, "Importance": importance})
+        .sort_values("Importance", ascending=False)
         .reset_index(drop=True)
     )
 
-    return importance_df
+
+def calculate_mean_shap(shap_values, feature_names, mask):
+    """Calculate mean signed SHAP value for one group."""
+
+    if mask.sum() == 0:
+        return pd.Series(0.0, index=feature_names, dtype=float)
+
+    return pd.Series(
+        shap_values[mask].mean(axis=0),
+        index=feature_names,
+        dtype=float,
+    )
+
+
+def calculate_global_importance(shap_values, feature_names):
+    """Calculate global mean absolute SHAP importance."""
+
+    return (
+        pd.DataFrame(
+            {
+                "Feature": feature_names,
+                "Importance": np.abs(shap_values).mean(axis=0),
+            }
+        )
+        .sort_values("Importance", ascending=False)
+        .reset_index(drop=True)
+    )
 
 
 # ============================================================
-# BAR PLOT
+# PLOTS
 # ============================================================
 
-def save_bar_plot(
-    group_name,
-    importance_df,
-    output_dir,
-):
-    """
-    Save SHAP bar plot for one group.
-    """
+
+def save_bar_plot(group_name, importance_df, output_dir, max_display=MAX_DISPLAY):
+    """Save a horizontal SHAP importance bar plot."""
 
     if importance_df.empty:
         return
 
-    values = (
-        importance_df
-        .head(MAX_DISPLAY)
-        .sort_values(
-            "Importance"
-        )
-    )
+    values = importance_df.head(max_display).sort_values("Importance")
 
-    plt.figure(
-        figsize=(10, 7)
-    )
-
-    plt.barh(
-        values["Feature"],
-        values["Importance"],
-    )
-
-    plt.xlabel(
-        "Mean |SHAP value|"
-    )
-
-    plt.ylabel(
-        "Feature"
-    )
-
-    plt.title(
-        f"SHAP feature importance — {group_name}"
-    )
-
+    plt.figure(figsize=(10, 7))
+    plt.barh(values["Feature"], values["Importance"])
+    plt.xlabel("Mean |SHAP value|")
+    plt.ylabel("Feature")
+    plt.title(f"SHAP feature importance — {group_name}")
     plt.tight_layout()
-
     plt.savefig(
-        os.path.join(
-            output_dir,
-            f"{group_name}_bar.png",
-        ),
+        output_dir / f"{group_name}_bar.png",
         dpi=200,
         bbox_inches="tight",
     )
-
     plt.close()
 
-
-# ============================================================
-# BEESWARM
-# ============================================================
 
 def save_beeswarm_plot(
     group_name,
@@ -304,55 +264,29 @@ def save_beeswarm_plot(
     feature_names,
     mask,
     output_dir,
+    max_display=MAX_DISPLAY,
 ):
-    """
-    Save SHAP beeswarm plot for one group.
-    """
+    """Save a SHAP beeswarm plot for one group."""
 
     if mask.sum() == 0:
         return
 
-    group_shap = (
-        shap_values[mask]
-    )
-
-    group_data = (
-        X_test_transformed[mask]
-    )
-
-    plt.figure(
-        figsize=(10, 7)
-    )
-
     shap.summary_plot(
-        group_shap,
-        group_data,
+        shap_values[mask],
+        X_test_transformed[mask],
         feature_names=feature_names,
-        max_display=MAX_DISPLAY,
+        max_display=max_display,
         show=False,
     )
-
-    plt.title(
-        f"SHAP distribution — {group_name}"
-    )
-
+    plt.title(f"SHAP distribution — {group_name}")
     plt.tight_layout()
-
     plt.savefig(
-        os.path.join(
-            output_dir,
-            f"{group_name}_beeswarm.png",
-        ),
+        output_dir / f"{group_name}_beeswarm.png",
         dpi=200,
         bbox_inches="tight",
     )
-
     plt.close()
 
-
-# ============================================================
-# WATERFALL
-# ============================================================
 
 def save_waterfall_plot(
     group_name,
@@ -365,35 +299,17 @@ def save_waterfall_plot(
     y_pred,
     y_proba,
     output_dir,
+    max_display=MAX_DISPLAY,
 ):
-    """
-    Save a representative SHAP waterfall plot
-    for one TP/TN/FP/FN group.
-
-    Representative observation is selected as
-    the observation with the largest total
-    absolute SHAP contribution.
-    """
+    """Save a representative waterfall plot for one error group."""
 
     indices = np.where(mask)[0]
-
     if len(indices) == 0:
-        return
+        return None
 
-    group_shap = (
-        shap_values[indices]
-    )
-
-    representative_position = np.argmax(
-        np.abs(group_shap)
-        .sum(axis=1)
-    )
-
-    test_idx = (
-        indices[
-            representative_position
-        ]
-    )
+    local_shap = shap_values[indices]
+    representative_position = np.argmax(np.abs(local_shap).sum(axis=1))
+    test_idx = int(indices[representative_position])
 
     explanation = shap.Explanation(
         values=shap_values[test_idx],
@@ -402,65 +318,31 @@ def save_waterfall_plot(
         feature_names=feature_names,
     )
 
-    plt.figure(
-        figsize=(10, 8)
-    )
-
     shap.plots.waterfall(
         explanation,
-        max_display=MAX_DISPLAY,
+        max_display=max_display,
         show=False,
     )
-
     plt.title(
         f"{group_name} — representative observation\n"
-        f"test index={test_idx}, "
-        f"true={y_test.iloc[test_idx]}, "
-        f"pred={y_pred[test_idx]}, "
-        f"probability={y_proba[test_idx]:.3f}"
+        f"test index={test_idx}, true={y_test.iloc[test_idx]}, "
+        f"pred={y_pred[test_idx]}, probability={y_proba[test_idx]:.3f}"
     )
-
     plt.tight_layout()
-
     plt.savefig(
-        os.path.join(
-            output_dir,
-            f"{group_name}_waterfall.png",
-        ),
+        output_dir / f"{group_name}_waterfall.png",
         dpi=200,
         bbox_inches="tight",
     )
-
     plt.close()
 
     return test_idx
 
 
 # ============================================================
-# SAVE GROUP IMPORTANCE
+# SAVE RESULTS
 # ============================================================
 
-def save_group_importance(
-    group_name,
-    importance_df,
-    output_dir,
-):
-    """
-    Save SHAP importance table.
-    """
-
-    importance_df.to_csv(
-        os.path.join(
-            output_dir,
-            f"{group_name}_importance.csv",
-        ),
-        index=False,
-    )
-
-
-# ============================================================
-# SAVE TEST PREDICTIONS
-# ============================================================
 
 def save_predictions_with_errors(
     X_test,
@@ -470,287 +352,156 @@ def save_predictions_with_errors(
     error_groups,
     output_dir,
 ):
-    """
-    Save test observations with prediction
-    and error-group information.
-    """
+    """Save test observations with predictions and TP/TN/FP/FN labels."""
 
     result_df = X_test.copy()
-
-    result_df["true_risk"] = (
-        y_test.to_numpy()
-    )
-
-    result_df["predicted_risk"] = (
-        y_pred
-    )
-
-    result_df["risk_probability"] = (
-        y_proba
-    )
-
+    result_df["true_risk"] = np.asarray(y_test)
+    result_df["predicted_risk"] = y_pred
+    result_df["risk_probability"] = y_proba
     result_df["error_type"] = "TN"
 
-    result_df.loc[
-        error_groups["TP"],
-        "error_type",
-    ] = "TP"
-
-    result_df.loc[
-        error_groups["TN"],
-        "error_type",
-    ] = "TN"
-
-    result_df.loc[
-        error_groups["FP"],
-        "error_type",
-    ] = "FP"
-
-    result_df.loc[
-        error_groups["FN"],
-        "error_type",
-    ] = "FN"
+    for group_name, mask in error_groups.items():
+        result_df.loc[mask, "error_type"] = group_name
 
     result_df.to_csv(
-        os.path.join(
-            output_dir,
-            "test_predictions_with_errors.csv",
-        ),
+        output_dir / "test_predictions_with_errors.csv",
         index=False,
     )
 
 
 # ============================================================
-# MAIN SHAP ANALYSIS
+# PUBLIC API
 # ============================================================
 
-def main():
 
-    os.makedirs(
-        OUTPUT_DIR,
-        exist_ok=True,
+def run_shap_analysis(
+    model_pipeline,
+    X_test,
+    max_display=MAX_DISPLAY,
+    output_dir: Path = OUTPUT_DIR,
+    threshold: float = DECISION_THRESHOLD,
+):
+    """Run global SHAP analysis for an already fitted model.
+
+    Returns ``(explainer, shap_values, X_test_transformed, shap_importance)``.
+    """
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    explainer, shap_values, _, X_test_transformed, feature_names = (
+        calculate_shap_values(model_pipeline, X_test)
     )
 
-    # --------------------------------------------------------
-    # 1. Load model and test data
-    # --------------------------------------------------------
+    shap_importance = calculate_global_importance(
+        shap_values,
+        feature_names,
+    )
+
+    shap_importance.to_csv(
+        output_dir / "global_importance.csv",
+        index=False,
+    )
+
+    return (
+        explainer,
+        shap_values,
+        X_test_transformed,
+        shap_importance,
+    )
+
+
+# ============================================================
+# CLI
+# ============================================================
+
+
+def main():
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     print("=" * 60)
     print("SHAP ERROR ANALYSIS")
     print("=" * 60)
 
-    print(
-        "\nLoading final XGBoost model..."
-    )
+    print("\nLoading final XGBoost model...")
+    model_pipeline, X_test, y_test = load_model_and_test_data()
+    print(f"Test shape: {X_test.shape}")
 
-    model_pipeline, X_test, y_test = (
-        load_model_and_test_data()
-    )
-
-    print(
-        f"Test shape: {X_test.shape}"
-    )
-
-    # --------------------------------------------------------
-    # 2. Predictions
-    # --------------------------------------------------------
-
-    print(
-        "\nGenerating predictions..."
-    )
-
+    print("\nGenerating predictions...")
     y_proba, y_pred = get_predictions(
         model_pipeline,
         X_test,
-        threshold=THRESHOLD,
+        threshold=DECISION_THRESHOLD,
     )
 
-    # --------------------------------------------------------
-    # 3. Confusion matrix
-    # --------------------------------------------------------
+    print("\nConfusion matrix:")
+    print(confusion_matrix(y_test, y_pred))
 
-    print(
-        "\nConfusion matrix:"
-    )
+    error_groups = create_error_groups(y_test, y_pred)
 
-    cm = confusion_matrix(
-        y_test,
-        y_pred,
-    )
+    print("\nError groups:")
+    for group_name, mask in error_groups.items():
+        print(f"{group_name}: {mask.sum()}")
 
-    print(cm)
-
-    # --------------------------------------------------------
-    # 4. Error groups
-    # --------------------------------------------------------
-
-    error_groups = create_error_groups(
-        y_test,
-        y_pred,
-    )
-
-    print(
-        "\nError groups:"
-    )
-
-    for group_name, mask in (
-        error_groups.items()
-    ):
-        print(
-            f"{group_name}: "
-            f"{mask.sum()}"
-        )
-
-    # --------------------------------------------------------
-    # 5. Calculate SHAP
-    # --------------------------------------------------------
-
-    print(
-        "\nCalculating SHAP values..."
-    )
-
+    print("\nCalculating SHAP values...")
     (
         explainer,
         shap_values,
         base_value,
         X_test_transformed,
         feature_names,
-    ) = calculate_shap_values(
-        model_pipeline,
-        X_test,
+    ) = calculate_shap_values(model_pipeline, X_test)
+
+    print("\n" + "=" * 60)
+    print("GLOBAL SHAP IMPORTANCE")
+    print("=" * 60)
+
+    global_importance = calculate_global_importance(
+        shap_values,
+        feature_names,
     )
 
-    # --------------------------------------------------------
-    # 6. Global SHAP importance
-    # --------------------------------------------------------
-
-    print(
-        "\n" + "=" * 60
-    )
-    print(
-        "GLOBAL SHAP IMPORTANCE"
-    )
-    print(
-        "=" * 60
-    )
-
-    global_importance = pd.DataFrame({
-        "Feature": feature_names,
-        "Importance": (
-            np.abs(shap_values)
-            .mean(axis=0)
-        ),
-    })
-
-    global_importance = (
-        global_importance
-        .sort_values(
-            "Importance",
-            ascending=False,
-        )
-        .reset_index(drop=True)
-    )
-
-    print(
-        global_importance
-        .head(MAX_DISPLAY)
-        .to_string(index=False)
-    )
-
+    print(global_importance.head(MAX_DISPLAY).to_string(index=False))
     global_importance.to_csv(
-        os.path.join(
-            OUTPUT_DIR,
-            "global_importance.csv",
-        ),
+        OUTPUT_DIR / "global_importance.csv",
         index=False,
     )
 
-    # --------------------------------------------------------
-    # 7. SHAP analysis for TP/TN/FP/FN
-    # --------------------------------------------------------
-
-    print(
-        "\n" + "=" * 60
-    )
-    print(
-        "SHAP ANALYSIS BY ERROR GROUP"
-    )
-    print(
-        "=" * 60
-    )
+    print("\n" + "=" * 60)
+    print("SHAP ANALYSIS BY ERROR GROUP")
+    print("=" * 60)
 
     representative_indices = {}
 
-    for group_name, mask in (
-        error_groups.items()
-    ):
+    for group_name, mask in error_groups.items():
+        print("\n" + "-" * 60)
+        print(group_name)
+        print("-" * 60)
+        print(f"Observations: {mask.sum()}")
 
-        print(
-            "\n" + "-" * 60
-        )
-
-        print(
-            f"{group_name}"
-        )
-
-        print(
-            "-" * 60
-        )
-
-        count = mask.sum()
-
-        print(
-            f"Observations: {count}"
-        )
-
-        if count == 0:
-            print(
-                "No observations in this group."
-            )
+        if mask.sum() == 0:
+            print("No observations in this group.")
             continue
 
-        # ----------------------------------------------------
-        # Importance
-        # ----------------------------------------------------
-
-        importance_df = (
-            calculate_group_importance(
-                shap_values,
-                feature_names,
-                mask,
-            )
+        importance_df = calculate_group_importance(
+            shap_values,
+            feature_names,
+            mask,
         )
 
-        print(
-            "\nTop SHAP features:"
-        )
+        print("\nTop SHAP features:")
+        print(importance_df.head(MAX_DISPLAY).to_string(index=False))
 
-        print(
-            importance_df
-            .head(MAX_DISPLAY)
-            .to_string(index=False)
+        importance_df.to_csv(
+            OUTPUT_DIR / f"{group_name}_importance.csv",
+            index=False,
         )
-
-        save_group_importance(
-            group_name,
-            importance_df,
-            OUTPUT_DIR,
-        )
-
-        # ----------------------------------------------------
-        # Bar plot
-        # ----------------------------------------------------
 
         save_bar_plot(
             group_name,
             importance_df,
             OUTPUT_DIR,
+            max_display=MAX_DISPLAY,
         )
-
-        # ----------------------------------------------------
-        # Beeswarm
-        # ----------------------------------------------------
-
         save_beeswarm_plot(
             group_name,
             shap_values,
@@ -758,34 +509,21 @@ def main():
             feature_names,
             mask,
             OUTPUT_DIR,
+            max_display=MAX_DISPLAY,
         )
-
-        # ----------------------------------------------------
-        # Representative waterfall
-        # ----------------------------------------------------
-
-        representative_idx = (
-            save_waterfall_plot(
-                group_name,
-                shap_values,
-                base_value,
-                X_test_transformed,
-                feature_names,
-                mask,
-                y_test,
-                y_pred,
-                y_proba,
-                OUTPUT_DIR,
-            )
+        representative_indices[group_name] = save_waterfall_plot(
+            group_name,
+            shap_values,
+            base_value,
+            X_test_transformed,
+            feature_names,
+            mask,
+            y_test,
+            y_pred,
+            y_proba,
+            OUTPUT_DIR,
+            max_display=MAX_DISPLAY,
         )
-
-        representative_indices[
-            group_name
-        ] = representative_idx
-
-    # --------------------------------------------------------
-    # 8. Save predictions
-    # --------------------------------------------------------
 
     save_predictions_with_errors(
         X_test,
@@ -796,50 +534,17 @@ def main():
         OUTPUT_DIR,
     )
 
-    # --------------------------------------------------------
-    # 9. Summary
-    # --------------------------------------------------------
+    print("\n" + "=" * 60)
+    print("SHAP ERROR ANALYSIS COMPLETED")
+    print("=" * 60)
+    print(f"\nThreshold: {DECISION_THRESHOLD}")
+    print(f"\nSaved results:\nDirectory: {OUTPUT_DIR}/")
+    print("\nRepresentative observations:")
 
-    print(
-        "\n" + "=" * 60
-    )
-    print(
-        "SHAP ERROR ANALYSIS COMPLETED"
-    )
-    print(
-        "=" * 60
-    )
-
-    print(
-        f"\nThreshold: {THRESHOLD}"
-    )
-
-    print(
-        "\nSaved results:"
-    )
-
-    print(
-        f"Directory: {OUTPUT_DIR}/"
-    )
-
-    print(
-        "\nRepresentative observations:"
-    )
-
-    for group_name, index in (
-        representative_indices.items()
-    ):
-
+    for group_name, index in representative_indices.items():
         if index is not None:
-            print(
-                f"{group_name}: "
-                f"test index {index}"
-            )
+            print(f"{group_name}: test index {index}")
 
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
 
 if __name__ == "__main__":
     main()
