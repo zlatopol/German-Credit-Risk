@@ -26,6 +26,11 @@ N_SPLITS = 5
 N_ITER_RANDOM_SEARCH = 30
 
 
+# Classification
+# Selected on the validation set to maximize F1.
+DECISION_THRESHOLD = 0.236
+
+
 # Output directories
 MODELS_DIR = PROJECT_ROOT / "models"
 REPORTS_DIR = PROJECT_ROOT / "reports"
