@@ -250,7 +250,7 @@ def build_report(
 def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    print_header("SHAP ERROR REPORT")
+    print_header("SHAP ANALYSIS REPORT")
     print("Loading final model and test data...")
 
     model_pipeline, X_test, y_test = load_model_and_test_data()
@@ -275,7 +275,7 @@ def main():
         X_test,
     )
 
-    _, global_importance, group_series = build_group_importance_table(
+    group_table, global_importance, group_series = build_group_importance_table(
         shap_values,
         feature_names,
         error_groups,
@@ -288,10 +288,24 @@ def main():
         error_groups,
     )
 
-    representatives = {
-        group: (int(np.where(mask)[0][0]) if mask.sum() else None)
-        for group, mask in error_groups.items()
-    }
+    representatives = {}
+
+    for group, mask in error_groups.items():
+        indices = np.where(mask)[0]
+
+        if len(indices) == 0:
+            representatives[group] = None
+            continue
+
+        group_shap = shap_values[indices]
+
+        representative_position = np.argmax(
+            np.abs(group_shap).sum(axis=1)
+        )
+
+        representatives[group] = int(
+            indices[representative_position]
+        )
 
     pd.DataFrame(
         {
@@ -300,11 +314,6 @@ def main():
         }
     ).to_csv(GLOBAL_IMPORTANCE_PATH, index=False)
 
-    group_table, _, _ = build_group_importance_table(
-        shap_values,
-        feature_names,
-        error_groups,
-    )
     group_table.to_csv(GROUP_IMPORTANCE_PATH, index=False)
     comparison.to_csv(COMPARISON_PATH, index=False)
 
