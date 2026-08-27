@@ -4,17 +4,22 @@ from src.preprocessing import build_preprocessor
 def test_ordinal_category_order_is_explicit():
     preprocessor = build_preprocessor()
 
-    ordinal_pipeline = preprocessor.named_transformers_["ordinal"]
+    ordinal_pipeline = next(
+        transformer
+        for name, transformer, columns in preprocessor.transformers
+        if name == "ordinal"
+    )
+
     ordinal_encoder = ordinal_pipeline.named_steps["ordinal"]
 
-    assert list(ordinal_encoder.categories_[0]) == [
+    assert ordinal_encoder.categories[0] == [
         "<0 DM",
         "0<=X<200 DM",
         ">=200 DM",
         "No account",
     ]
 
-    assert list(ordinal_encoder.categories_[1]) == [
+    assert ordinal_encoder.categories[1] == [
         "little",
         "moderate",
         "quite rich",
